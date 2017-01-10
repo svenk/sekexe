@@ -1,0 +1,82 @@
+#!/bin/bash 
+
+# Using VDE instead of Slirp.
+
+VDESOCK="/tmp/switch1"
+
+if [ "$2" ]
+then
+	shift
+	echo "Extraneous arguments: $*"
+	echo "Try to enclose them within quotes?"
+	exit 255
+fi
+
+INITDIR="$(readlink --canonicalize $(dirname "$0"))"
+
+LOGDIR=$INITDIR/logs/sekexe-log.$$
+mkdir -p $LOGDIR
+
+if [ "$1" ]
+then
+	CMD="$1"
+	STDIN=/dev/null
+	STDOUT=/dev/null
+	STDERR=/dev/null
+	touch $LOGDIR/output
+	tail -f $LOGDIR/output &
+	TAILPID=$!
+	trap '' TERM
+else
+	CMD=/bin/bash
+	STDIN=/dev/stdin
+	STDOUT=/dev/stdout
+	STDERR=/dev/stderr
+	TAILPID=""
+fi
+
+# an option to reconstruct the session
+env > $LOGDIR/env
+echo "$CMD" > $LOGDIR/cmd
+
+
+# One option which works nicely is to boot from a ext4
+# image file which is populated with busybox and a small 
+# init script. This allows mounting hostfs at /host and
+# putting up a system with bind mounts. However,
+# overlayfs and hostfs don't play together very well, so
+# there is little advantage over directly using the host root.
+
+#$INITDIR/uml4 quiet mem=1G \
+#	rootfstype=ext4 rw \
+#	ubd0s=$LOGDIR/root.cow:../miniroot.ext4 \
+#	eth0=vde,$VDESOCK \
+#	init=/uml/busybox-bin/sh \
+#	LOGDIR="$LOGDIR" INITDIR="$INITDIR" \
+#	<$STDIN >$STDOUT 2>$STDERR
+
+# directly boot from the host
+
+$INITDIR/uml4 quiet \
+	mem="$(grep "MemTotal" "/proc/meminfo" | awk '{ print $2 }')K" \
+	cgroup_enable=memory \
+	rootfstype=hostfs rootflags=/ rw \
+	eth0=vde,$VDESOCK \
+	init=$INITDIR/init LOGDIR="$LOGDIR" \
+	<$STDIN >$STDOUT 2>$STDERR
+
+# Due to a weird behavior of usermodelinux, sometimes it will kill the
+# whole process group, and we won't have to kill tail. Duh.
+[ "$TAILPID" ] && [ -d /proc/$TAILPID ] && 
+	/bin/kill $TAILPID >/dev/null 2>/dev/null
+
+STATUS=""
+[ -f "$LOGDIR/status" ] && STATUS="$(cat $LOGDIR/status)"
+[ "$DEBUG" ] || rm -rf "$LOGDIR"
+[ "$STATUS" ] && exit $STATUS
+exit 255
+
+# frequently, the terminal is shot up at this stage and
+# using "reset" is the only way to get it working again.
+
+

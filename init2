@@ -1,0 +1,102 @@
+#!/bin/bash -x
+
+echo "init2 for sekexe for ext4 miniroot booting"
+
+# at this point, we have a mounted /host but nothing more.
+# This script is run throught the busybox sh.
+
+# setup all the needed directories
+mkdir -p /tmp /proc /sys /etc /run
+mkdir -p /var/run /var/lib/docker /var/log
+mkdir -p /dev /dev/shm /dev/pts
+
+# mount the host (ALREADY DONE IN THE STUB)
+#mount -t hostfs / /host
+
+# mount ramdisks
+mount -t tmpfs none /tmp
+mount -t tmpfs none /run
+mount -t tmpfs none /var/run
+mount -t tmpfs none /var/lib/docker
+mount -t tmpfs none /dev/shm
+
+# the sekexe log input/output directoy
+mount -t hostfs -o $LOGDIR none /var/log
+
+# mount procfs/sysfs stuff
+mount -t proc none /proc
+mount -t devpts none /dev/pts
+
+mount -t sysfs none /sys
+mount -t tmpfs none /sys/fs/cgroup
+for SUBSYS in memory devices cpuset
+do
+mkdir /sys/fs/cgroup/$SUBSYS
+mount -t cgroup -o $SUBSYS none /sys/fs/cgroup/$SUBSYS
+done
+
+# bind everything from /host to simulate the basis system
+cd /host
+for HOSTDIR in *; do
+	if [ -d $HOSTDIR ] && ! [ -e /$HOSTDIR ]; then
+		# bind this directory
+		echo "Binding /host/$HOSTDIR -> /$HOSTDIR"
+		mkdir -p /$HOSTDIR
+		mount -o bind $HOSTDIR /$HOSTDIR
+	else
+		echo "Not binding /host/$HOSTDIR"
+	fi
+done
+
+# An overlay for /etc for proper DNS resolving
+umount /etc
+etcbase="/uml/etc/"
+mkdir -p $etcbase/upper $etcbase/work
+etc="$etcbase/upper"
+# populate $etc before the overlay as otherwise we cannot change
+# the types of files sometimes.
+echo "nameserver 8.8.8.8" > $etc/resolv.conf
+ln -s ../proc/self/mounts $etc/mtab
+echo > $etc/fstab
+echo "uml-sekexe" > $etc/hostname
+# now mount the overlay
+mount -t overlay overlay -o lowerdir=/host/etc,upperdir=$etcbase/upper,workdir=$etcbase/work /etc
+
+#### OVERLAYFS even does not work when
+#### all paths (lower,upper,target) are
+#### different and upper,work is not only
+#### on tmpfs but even on extfs.
+#### ===> DOES NOT WORK with hostfs as lower.
+
+# This is to handle when /etc/resolv.conf -> /run/resolvconf/resolv.conf
+#[ -L /etc/resolv.conf ] && {
+#	mkdir -p $(dirname $(readlink --canonicalize-missing /etc/resolv.conf))
+#	[ -f /etc/resolv.conf ] || {
+#		cat /var/log/resolv.conf > /etc/resolv.conf
+#	}
+#}
+
+
+echo 1 > /proc/sys/net/ipv4/ip_forward
+echo 0 > /proc/sys/kernel/printk
+
+# use dhcp for obtaining ip address.
+
+ifconfig eth0 up
+dhclient -v eth0
+
+#ip addr add 127.0.0.1 dev lo
+#ip link set lo up
+#ip addr add 10.1.1.1/24 dev eth0
+#ip link set eth0 up
+#ip route add default via 10.1.1.254
+
+[ -f /var/log/output ] && {
+	exec >>/var/log/output
+	exec 2>>/var/log/output
+}
+sh /var/log/cmd
+echo $? >/var/log/status
+# This will make sure that the main "tail" process had the opportunity
+# to display everything before being killed by UML misbehavior.
+sleep 1

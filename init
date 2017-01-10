@@ -1,0 +1,90 @@
+#!/bin/bash 
+echo -e "Classical sekexe init running"
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# We use the host file system as root, so we cannot create arbitrary
+# directories. Thus we constraint ourselves to well-known mount points
+# and mostly work with
+#   $LOGDIR (the guest/host i/o directory), and
+#   /tmp/uml (where we can play nicely)
+
+mount -t tmpfs none /tmp
+mount -t tmpfs none /var/run
+mount -t hostfs -o $LOGDIR none /var/log
+mount -t tmpfs none /var/lib/docker
+mount -t proc none /proc
+mkdir /dev/pts
+mount -t devpts none /dev/pts
+mkdir /dev/shm
+mount -t tmpfs none /dev/shm
+mount -t sysfs none /sys
+mount -t tmpfs none /sys/fs/cgroup
+for SUBSYS in memory devices cpuset
+do
+mkdir /sys/fs/cgroup/$SUBSYS
+mount -t cgroup -o $SUBSYS none /sys/fs/cgroup/$SUBSYS
+done
+echo 1 > /proc/sys/net/ipv4/ip_forward
+echo 0 > /proc/sys/kernel/printk
+
+# Using VDE, we use DHCP for setting up the network.
+
+ifconfig eth0 up
+
+has() { type $1 >/dev/null 2>&1; }
+
+if has dhclient ; then
+	dhclient -v eth0
+elif has dhcpcpd ; then
+	dhcpcd -d -t 3 eth0
+else
+	echo "No DHCP client found"
+fi
+
+#ip addr add 127.0.0.1 dev lo
+#ip link set lo up
+#ip addr add 10.1.1.1/24 dev eth0
+#ip link set eth0 up
+#ip route add default via 10.1.1.254
+
+# A softlink workaround for /etc proper DNS resolving
+mkdir -p /tmp/uml/host
+mount -t hostfs -o / none /tmp/uml/host
+etc="/tmp/uml/etc"
+mkdir -p $etc
+
+# populate $etc nicely
+echo "nameserver 8.8.8.8" > $etc/resolv.conf
+ln -s /proc/self/mounts $etc/mtab
+echo > $etc/fstab
+echo "uml-sekexe" > $etc/hostname
+
+# now do something similar to an overlayfs mount ("one-time-shot")
+mount -t tmpfs none /etc
+ln -s /tmp/uml/host/etc/* /etc
+cp --remove-destination -a $etc/* /etc
+
+# This is to handle when /etc/resolv.conf -> /run/resolvconf/resolv.conf
+#[ -L /etc/resolv.conf ] && {
+#	mkdir -p $(dirname $(readlink --canonicalize-missing /etc/resolv.conf))
+#	[ -f /etc/resolv.conf ] || {
+#		cat /var/log/resolv.conf > /etc/resolv.conf
+#	}
+#}
+
+# export the host environment
+# does not work with lines like FOO=a b c
+while read -r line; do
+    export "$line"
+done < $LOGDIR/env
+
+[ -f /var/log/output ] && {
+	exec >>/var/log/output
+	exec 2>>/var/log/output
+}
+
+sh /var/log/cmd
+echo $? >/var/log/status
+# This will make sure that the main "tail" process had the opportunity
+# to display everything before being killed by UML misbehavior.
+sleep 1
